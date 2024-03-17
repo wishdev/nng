@@ -34,6 +34,8 @@
 #include <nng/supplemental/util/platform.h>
 #include <nng/transport/zerotier/zerotier.h>
 
+#define pipe_chunk_size 1024
+
 // Globals.  We need this to avoid passing around everything.
 int          format    = 0;
 int          proto     = 0;
@@ -712,27 +714,39 @@ sendrecv(nng_socket sock)
 void
 pipeloop(nng_socket sock)
 {
-	if (pipefile == NULL) {
-		fatal("No pipe to send (specify with --pipe)");
-	}
 	if (delay > 0) {
 		nng_msleep(delay);
 	}
 
 	int      rv;
 	nng_msg *msg;
-	char    *line = NULL;
-	size_t   len  = 0;
-	ssize_t  read;
+	int      in_msg                        = 0;
+	char     msg_part[pipe_chunk_size + 1] = "";
 
-	while ((read = getline(&line, &len, pipefile)) != -1) {
-		if (((rv = nng_msg_alloc(&msg, 0)) != 0) ||
-		    ((rv = nng_msg_append(msg, line, read)) != 0)) {
+	if ((rv = nng_msg_alloc(&msg, 0)) != 0) {
+		fatal(nng_strerror(rv));
+	}
+
+	while (fgets(msg_part, pipe_chunk_size, pipefile)) {
+		in_msg           = 1;
+		int msg_part_len = strlen(msg_part);
+
+		if ((rv = nng_msg_append(msg, msg_part, msg_part_len)) != 0) {
 			fatal(nng_strerror(rv));
 		}
-		if ((rv = nng_sendmsg(sock, msg, 0)) != 0) {
-			fatal("Send error: %s", nng_strerror(rv));
+
+		if (msg_part_len != pipe_chunk_size) {
+			if ((rv = nng_sendmsg(sock, msg, 0)) != 0) {
+				fatal("Send error: %s", nng_strerror(rv));
+			}
+
+			nng_msg_clear(msg);
+			in_msg = 0;
 		}
+	}
+
+	if (in_msg && ((rv = nng_sendmsg(sock, msg, 0)) != 0)) {
+		fatal("Send error: %s", nng_strerror(rv));
 	}
 
 	// Wait a bit to give queues a chance to drain.
